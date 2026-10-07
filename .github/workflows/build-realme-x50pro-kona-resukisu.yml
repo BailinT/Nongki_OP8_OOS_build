@@ -1,0 +1,116 @@
+name: Build realme X50 Pro (kona, RUI) -- ReSukiSU
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    name: realme X50 Pro (RMX2075) kona-perf ReSukiSU
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y bc bison build-essential flex git \
+            libssl-dev libelf-dev lld llvm python3 python-is-python3 \
+            zip unzip cpio rsync curl gcc g++ binutils-aarch64-linux-gnu
+
+      - name: Checkout realme kernel source (yassshhhhh15 proven tree)
+        uses: actions/checkout@v4
+        with:
+          repository: yassshhhhh15/android_kernel_realme_sm8250
+          ref: rui5/2100
+          fetch-depth: 1
+
+      - name: Clone clang-20 toolchain (yassshhhhh15 proven)
+        run: |
+          git clone --depth=1 https://gitlab.com/provasishh/clang-20.git tc
+          ls tc/clang/bin/clang && tc/clang/bin/clang --version | head -2
+
+      - name: Setup ReSukiSU (in-tree)
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          test -d KernelSU && echo "KernelSU integrated: $(git -C KernelSU rev-parse --short HEAD 2>/dev/null || echo ok)"
+          test -f drivers/kernelsu/Makefile && echo "drivers/kernelsu registered"
+
+      - name: Build Image + dtbo (kona-perf_defconfig)
+        run: |
+          set -o pipefail
+          DT=$(date +"%Y%m%d-%H%M")
+          echo "BUILD_DT=$DT" >> $GITHUB_ENV
+          export CROSS_COMPILE=$(pwd)/tc/aarch64-linux-android-4.9/bin/aarch64-linux-android-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export PATH=$(pwd)/tc/clang/bin:$PATH
+          test -f "$CROSS_COMPILE"ld || echo "note: GCC4.9 binutils has no ld; LD=ld.lld passed explicitly"
+          mkdir -p artifacts
+
+          make O=out CC=$(pwd)/tc/clang/bin/clang \
+            LLVM_IAS=1 ARCH=arm64 LD=ld.lld \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            vendor/kona-perf_defconfig
+
+          make -j$(nproc) O=out CC=$(pwd)/tc/clang/bin/clang \
+            LLVM_IAS=1 ARCH=arm64 LD=ld.lld \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            all 2>&1 | tee artifacts/build.log | tail -40
+
+          test -f out/arch/arm64/boot/Image || { echo "::error::Image missing"; exit 1; }
+          ls -lh out/arch/arm64/boot/
+
+      - name: Pack AnyKernel3
+        run: |
+          set -e
+          git clone https://github.com/yassshhhh15/AnyKernel3.git --depth=1 anykernel || \
+            git clone https://github.com/osm0sis/AnyKernel3.git --depth=1 anykernel
+          cd anykernel
+          rm -rf .git .github README.md anykernel.zip
+          # realme X50 Pro (RMX2075): boot 分区，非 A/B 布局的 x50pro 用 BLOCK auto
+          cat > anykernel.sh <<'EOF'
+          # AnyKernel3 for realme X50 Pro (kona) ReSukiSU
+          properties() { '
+          kernel.string=ReSukiSU kona kernel for realme X50 Pro (RMX2075)
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          '; }
+
+          BLOCK=auto;
+          IS_SLOT_DEVICE=0;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          split_boot;
+          flash_boot;
+          EOF
+          cp ../out/arch/arm64/boot/Image .
+          if [ -f ../out/arch/arm64/boot/dtbo.img ]; then cp ../out/arch/arm64/boot/dtbo.img .; fi
+          if [ -f ../out/arch/arm64/boot/dtb ]; then cp ../out/arch/arm64/boot/dtb .; fi
+          zip -r9 ../AK3_realme_x50pro_resukisu_${{ env.BUILD_DT }}.zip .
+          cd ..
+          ls -lh AK3_*.zip
+          sha256sum AK3_*.zip > AK3_realme_x50pro.sha256
+
+      - name: Upload flashable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: AK3_realme_x50pro_resukisu_${{ env.BUILD_DT }}
+          path: |
+            AK3_*.zip
+            AK3_realme_x50pro.sha256
+          compression-level: 9
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: realme_buildlog_${{ env.BUILD_DT }}
+          path: artifacts/build.log
+          compression-level: 9
